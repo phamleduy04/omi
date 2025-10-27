@@ -3,7 +3,9 @@ export const Theme = {
     // Core
     background: '#000',
     accent: '#fff',
+    accentLight: '#f0f0f0',
     divider: '#f0f0f0',
+    border: '#222',
 
     // Text
     text: '#fff',

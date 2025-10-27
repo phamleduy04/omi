@@ -1,0 +1,52 @@
+# ESP32-S3 SDK Configuration for OMI Glass
+# This file increases stack sizes to prevent BLE stack overflow during data transfers
+
+# ============================================================================
+# Bluetooth Controller Configuration
+# ============================================================================
+# Increase BT controller task stack size (default: 3584, increased to 5120)
+# This prevents stack overflow during intensive BLE data transfers
+CONFIG_ESP32_BT_CONTROLLER_TASK_STACK_SIZE=5120
+
+# BT controller task priority (default: 23, keep high priority for stability)
+CONFIG_ESP32_BT_CONTROLLER_TASK_PRIORITY=23
+
+# ============================================================================
+# Bluetooth Host (Bluedroid/NimBLE) Configuration
+# ============================================================================
+# Increase Bluedroid/NimBLE task stack size (default: 4096, increased to 6144)
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=6144
+
+# NimBLE task priority
+CONFIG_BT_NIMBLE_TASK_PRIORITY=23
+
+# ============================================================================
+# Memory Configuration
+# ============================================================================
+# Enable PSRAM for additional memory (already enabled via build flags)
+CONFIG_ESP32S3_SPIRAM_SUPPORT=y
+
+# Allow allocating BLE memory from PSRAM when needed
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+
+# ============================================================================
+# Additional BLE Optimizations
+# ============================================================================
+# Increase ACL connections buffer size for more stable transfers
+CONFIG_BT_NIMBLE_ACL_BUF_COUNT=20
+CONFIG_BT_NIMBLE_ACL_BUF_SIZE=255
+
+# Enable BLE power management
+CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT=y
+
+# ============================================================================
+# System Configuration
+# ============================================================================
+# Increase main task stack size for safety
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
+
+# Watchdog timers - increase timeouts during BLE operations
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+
+# Enable stack overflow checking
+CONFIG_ESP_SYSTEM_CHECK_INT_LEVEL_4=y

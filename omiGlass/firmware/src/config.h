@@ -42,16 +42,16 @@
 #define BATTERY_ADC_PIN 2                // GPIO2 (A1) - voltage divider connection
 
 // =============================================================================
-// CAMERA CONFIGURATION - Power optimized for 6-8 hour battery life
+// CAMERA CONFIGURATION - Optimized for reliable 5 FPS with good quality
 // =============================================================================
-#define CAMERA_FRAME_SIZE FRAMESIZE_VGA // 640x480 - optimal balance
-#define CAMERA_JPEG_QUALITY 25          // Slightly higher quality for better compression efficiency
-#define CAMERA_XCLK_FREQ 6000000        // 6MHz - reduced from 8MHz for power savings
+#define CAMERA_FRAME_SIZE FRAMESIZE_VGA  // 640x480 - good quality
+#define CAMERA_JPEG_QUALITY 25           // Good quality with better compression (prevents BLE errors)
+#define CAMERA_XCLK_FREQ 10000000        // 10MHz - faster camera clock
 #define CAMERA_FB_IN_PSRAM CAMERA_FB_IN_PSRAM
 #define CAMERA_GRAB_LATEST CAMERA_GRAB_LATEST
 
-// Fixed Photo Capture Interval - Optimized for 6-8 hour operation
-#define PHOTO_CAPTURE_INTERVAL_MS 30000 // Fixed 30 second interval
+// Fixed Photo Capture Interval - 5 FPS with high quality
+#define PHOTO_CAPTURE_INTERVAL_MS 200 // Fixed 200ms interval (5 FPS)
 #define CAMERA_TASK_INTERVAL_MS 2000    // 2 second task check
 #define CAMERA_TASK_STACK_SIZE 3072     // Reduced stack size
 #define CAMERA_TASK_PRIORITY 2
@@ -73,11 +73,47 @@ typedef enum {
 #define FIXED_IMAGE_ORIENTATION ORIENTATION_180_DEGREES
 
 // =============================================================================
+// AUDIO/MICROPHONE CONFIGURATION - I2S Digital Microphone
+// =============================================================================
+// Audio Parameters
+#define AUDIO_SAMPLE_RATE 16000       // 16kHz sample rate (standard for speech)
+#define AUDIO_BIT_DEPTH 16            // 16-bit audio samples
+#define AUDIO_CHANNELS 1              // Mono audio
+#define AUDIO_FRAME_SIZE 320          // 320 bytes = 160 samples = 10ms @ 16kHz 16-bit
+#define AUDIO_DMA_BUFFER_COUNT 8      // Number of DMA buffers
+#define AUDIO_DMA_BUFFER_SIZE 320     // Size of each DMA buffer (must match frame size)
+
+// Audio Codec Configuration
+#define AUDIO_CODEC_PCM8 1           // 8-bit PCM codec ID
+#define AUDIO_CODEC_OPUS 20          // Opus codec ID (future use)
+#define AUDIO_DEFAULT_CODEC AUDIO_CODEC_PCM8
+
+// I2S Pin Configuration for XIAO ESP32S3 Sense
+// The Sense board has a built-in digital microphone connected via I2S
+// According to XIAO ESP32S3 Sense specs, the I2S pins are:
+#define I2S_WS_PIN 42    // I2S Word Select (LRCK) - GPIO42
+#define I2S_SD_PIN 41    // I2S Serial Data (DOUT) - GPIO41
+#define I2S_SCK_PIN 43   // I2S Serial Clock (BCLK) - GPIO43
+
+// I2S Configuration
+#define I2S_PORT I2S_NUM_0           // Use I2S port 0
+#define I2S_SAMPLE_BITS 16           // 16-bit samples
+#define I2S_MODE (I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM) // PDM microphone mode
+
+// Audio Buffer Management
+#define AUDIO_BUFFER_POOL_SIZE 16    // Number of audio buffers in pool
+#define AUDIO_CAPTURE_ENABLED true   // Enable audio capture by default
+
+// Audio Power Management
+#define AUDIO_IDLE_POWER_DOWN_MS 10000 // Power down mic after 10s idle
+#define AUDIO_ACTIVE_CURRENT_MA 15     // Additional current draw when mic active (~15mA)
+
+// =============================================================================
 // BLE CONFIGURATION - Power optimized for extended battery life
 // =============================================================================
 #define BLE_MTU_SIZE 517            // Maximum MTU for efficiency
 #define BLE_CHUNK_SIZE 500          // Safe chunk size for photo transfer
-#define BLE_PHOTO_TRANSFER_DELAY 3  // Fast transfer for connection stability
+#define BLE_PHOTO_TRANSFER_DELAY 3  // 3ms delay prevents BLE stack overflow errors
 #define BLE_TX_POWER ESP_PWR_LVL_N0 // Low power for 6+ hour battery life
 
 // Power-optimized BLE Advertising - Longer intervals for power savings

@@ -7,6 +7,7 @@
 #include <BLEUtils.h>
 
 #include "config.h" // Use config.h for all configurations
+#include "driver/i2s.h"
 #include "esp_camera.h"
 #include "esp_sleep.h"
 
@@ -14,6 +15,15 @@
 float batteryVoltage = 0.0f;
 int batteryPercentage = 0;
 unsigned long lastBatteryCheck = 0;
+
+// Audio state
+bool isCapturingAudio = false;
+bool audioDataUploading = false;
+size_t sent_audio_bytes = 0;
+size_t sent_audio_frames = 0;
+uint8_t *audioBuffer = nullptr;
+size_t audioBufferSize = 0;
+unsigned long lastAudioCaptureTime = 0;
 
 // Device power state
 bool deviceActive = true;
@@ -46,10 +56,14 @@ bool lightSleepEnabled = true;
 static BLEUUID serviceUUID(OMI_SERVICE_UUID);
 static BLEUUID photoDataUUID(PHOTO_DATA_UUID);
 static BLEUUID photoControlUUID(PHOTO_CONTROL_UUID);
+static BLEUUID audioDataUUID(AUDIO_DATA_UUID);
+static BLEUUID audioControlUUID(AUDIO_CONTROL_UUID);
 
 // Characteristics
 BLECharacteristic *photoDataCharacteristic;
 BLECharacteristic *photoControlCharacteristic;
+BLECharacteristic *audioDataCharacteristic;
+BLECharacteristic *audioControlCharacteristic;
 BLECharacteristic *batteryLevelCharacteristic;
 
 // State
@@ -70,6 +84,9 @@ image_orientation_t current_photo_orientation = ORIENTATION_0_DEGREES;
 
 // Forward declarations
 void handlePhotoControl(int8_t controlValue);
+void handleAudioControl(int8_t controlValue);
+bool captureAudio();
+void configure_audio();
 void readBatteryLevel();
 void updateBatteryService();
 void IRAM_ATTR buttonISR();
@@ -275,6 +292,7 @@ class ServerHandler : public BLEServerCallbacks
         connected = true;
         lastActivity = millis(); // Register activity - prevents sleep
         Serial.println(">>> BLE Client connected.");
+
         // Send current battery level on connect
         updateBatteryService();
     }
@@ -296,6 +314,20 @@ class PhotoControlCallback : public BLECharacteristicCallbacks
             Serial.println(received);
             lastActivity = millis(); // Register activity - prevents sleep
             handlePhotoControl(received);
+        }
+    }
+};
+
+class AudioControlCallback : public BLECharacteristicCallbacks
+{
+    void onWrite(BLECharacteristic *characteristic) override
+    {
+        if (characteristic->getLength() == 1) {
+            int8_t received = characteristic->getData()[0];
+            Serial.print("AudioControl received: ");
+            Serial.println(received);
+            lastActivity = millis(); // Register activity - prevents sleep
+            handleAudioControl(received);
         }
     }
 };
@@ -384,6 +416,13 @@ void configure_ble()
 {
     Serial.println("Initializing BLE...");
     BLEDevice::init(BLE_DEVICE_NAME);
+
+    // Set BLE power level for better range
+    BLEDevice::setPower(BLE_TX_POWER);
+
+    // Set MTU size for better throughput
+    BLEDevice::setMTU(BLE_MTU_SIZE);
+
     BLEServer *server = BLEDevice::createServer();
     server->setCallbacks(new ServerHandler());
 
@@ -402,6 +441,19 @@ void configure_ble()
     photoControlCharacteristic->setCallbacks(new PhotoControlCallback());
     uint8_t controlValue = 0;
     photoControlCharacteristic->setValue(&controlValue, 1);
+
+    // Audio Data characteristic
+    audioDataCharacteristic = service->createCharacteristic(
+        audioDataUUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+    BLE2902 *audioCcc = new BLE2902();
+    audioCcc->setNotifications(true);
+    audioDataCharacteristic->addDescriptor(audioCcc);
+
+    // Audio Control characteristic
+    audioControlCharacteristic = service->createCharacteristic(audioControlUUID, BLECharacteristic::PROPERTY_WRITE);
+    audioControlCharacteristic->setCallbacks(new AudioControlCallback());
+    uint8_t audioControlValue = 0;
+    audioControlCharacteristic->setValue(&audioControlValue, 1);
 
     // Battery Service
     BLEService *batteryService = server->createService(BATTERY_SERVICE_UUID);
@@ -549,11 +601,102 @@ void configure_camera()
 }
 
 // -------------------------------------------------------------------------
+// Audio Functions
+// -------------------------------------------------------------------------
+void configure_audio()
+{
+    Serial.println("Initializing I2S audio...");
+
+    i2s_config_t i2s_config = {
+        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM),
+        .sample_rate = AUDIO_SAMPLE_RATE,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = AUDIO_DMA_BUFFER_COUNT,
+        .dma_buf_len = AUDIO_DMA_BUFFER_SIZE,
+        .use_apll = false,
+        .tx_desc_auto_clear = false,
+        .fixed_mclk = 0
+    };
+
+    i2s_pin_config_t pin_config = {
+        .bck_io_num = I2S_SCK_PIN,
+        .ws_io_num = I2S_WS_PIN,
+        .data_out_num = I2S_PIN_NO_CHANGE,
+        .data_in_num = I2S_SD_PIN
+    };
+
+    esp_err_t err = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+    if (err != ESP_OK) {
+        Serial.printf("I2S driver install failed with error 0x%x\n", err);
+        return;
+    }
+
+    err = i2s_set_pin(I2S_PORT, &pin_config);
+    if (err != ESP_OK) {
+        Serial.printf("I2S set pin failed with error 0x%x\n", err);
+        return;
+    }
+
+    Serial.println("I2S audio initialized successfully.");
+}
+
+bool captureAudio()
+{
+    if (audioBuffer != nullptr) {
+        free(audioBuffer);
+        audioBuffer = nullptr;
+    }
+
+    size_t captureSize = AUDIO_FRAME_SIZE * 100; // Capture 1 second of audio (100 frames)
+    audioBuffer = (uint8_t *)ps_malloc(captureSize);
+    if (!audioBuffer) {
+        Serial.println("Failed to allocate audio buffer!");
+        return false;
+    }
+
+    size_t bytes_read = 0;
+    Serial.println("Capturing audio...");
+
+    esp_err_t result = i2s_read(I2S_PORT, audioBuffer, captureSize, &bytes_read, portMAX_DELAY);
+
+    if (result != ESP_OK) {
+        Serial.printf("I2S read failed with error 0x%x\n", result);
+        free(audioBuffer);
+        audioBuffer = nullptr;
+        return false;
+    }
+
+    audioBufferSize = bytes_read;
+    Serial.print("Audio captured: ");
+    Serial.print(audioBufferSize);
+    Serial.println(" bytes.");
+
+    lastActivity = millis(); // Register activity
+    return true;
+}
+
+void handleAudioControl(int8_t controlValue)
+{
+    if (controlValue == 1) {
+        Serial.println("Received command: Start audio capture.");
+        isCapturingAudio = true;
+    } else if (controlValue == 0) {
+        Serial.println("Received command: Stop audio capture.");
+        isCapturingAudio = false;
+    }
+}
+
+// -------------------------------------------------------------------------
 // Setup & Loop
 // -------------------------------------------------------------------------
 
 // A small buffer for sending photo chunks over BLE
 static uint8_t *s_compressed_frame_2 = nullptr;
+// Audio transmission buffer
+static uint8_t *s_audio_frame_buffer = nullptr;
 
 void setup_app()
 {
@@ -579,6 +722,7 @@ void setup_app()
 
     configure_ble();
     configure_camera();
+    configure_audio();
 
     // Allocate buffer for photo chunks (200 bytes + 2 for frame index)
     s_compressed_frame_2 = (uint8_t *) ps_calloc(202, sizeof(uint8_t));
@@ -586,6 +730,14 @@ void setup_app()
         Serial.println("Failed to allocate chunk buffer!");
     } else {
         Serial.println("Chunk buffer allocated successfully.");
+    }
+
+    // Allocate buffer for audio chunks (200 bytes + 2 for frame index)
+    s_audio_frame_buffer = (uint8_t *) ps_calloc(202, sizeof(uint8_t));
+    if (!s_audio_frame_buffer) {
+        Serial.println("Failed to allocate audio buffer!");
+    } else {
+        Serial.println("Audio buffer allocated successfully.");
     }
 
     // Set default capture interval from config
@@ -665,19 +817,23 @@ void loop_app()
         size_t remaining = fb->len - sent_photo_bytes;
         if (remaining > 0) {
             size_t bytes_to_copy;
+            // Use MTU-3 for maximum throughput (514 bytes payload)
+            const size_t max_first_chunk = (BLE_MTU_SIZE - 3) - 3;  // 511 bytes (MTU overhead + metadata)
+            const size_t max_chunk = (BLE_MTU_SIZE - 3) - 2;        // 512 bytes (MTU overhead + frame index)
+
             if (sent_photo_frames == 0) {
                 // First chunk: includes orientation metadata
                 s_compressed_frame_2[0] = 0; // Frame index low byte
                 s_compressed_frame_2[1] = 0; // Frame index high byte
                 s_compressed_frame_2[2] = (uint8_t) current_photo_orientation;
-                bytes_to_copy = (remaining > 199) ? 199 : remaining;
+                bytes_to_copy = (remaining > max_first_chunk) ? max_first_chunk : remaining;
                 memcpy(&s_compressed_frame_2[3], &fb->buf[sent_photo_bytes], bytes_to_copy);
                 photoDataCharacteristic->setValue(s_compressed_frame_2, bytes_to_copy + 3);
             } else {
                 // Subsequent chunks
                 s_compressed_frame_2[0] = (uint8_t) (sent_photo_frames & 0xFF);
                 s_compressed_frame_2[1] = (uint8_t) ((sent_photo_frames >> 8) & 0xFF);
-                bytes_to_copy = (remaining > 200) ? 200 : remaining;
+                bytes_to_copy = (remaining > max_chunk) ? max_chunk : remaining;
                 memcpy(&s_compressed_frame_2[2], &fb->buf[sent_photo_bytes], bytes_to_copy);
                 photoDataCharacteristic->setValue(s_compressed_frame_2, bytes_to_copy + 2);
             }
@@ -695,6 +851,9 @@ void loop_app()
             Serial.println(" bytes remaining.");
 
             lastActivity = now; // Register activity
+
+            // Small delay to allow BLE stack to process and prevent stack overflow
+            delay(BLE_PHOTO_TRANSFER_DELAY);
         } else {
             // End of photo marker
             s_compressed_frame_2[0] = 0xFF;
@@ -711,14 +870,89 @@ void loop_app()
         }
     }
 
+    // Check if it's time to capture audio
+    if (isCapturingAudio && !audioDataUploading && connected && !photoDataUploading) {
+        unsigned long audioInterval = 1000; // 1 second audio capture intervals
+        if (now - lastAudioCaptureTime >= audioInterval) {
+            Serial.println("Capturing audio...");
+            if (captureAudio()) {
+                Serial.println("Audio capture successful. Starting upload...");
+                audioDataUploading = true;
+                sent_audio_bytes = 0;
+                sent_audio_frames = 0;
+                lastAudioCaptureTime = now;
+            }
+        }
+    }
+
+    // If uploading audio, send chunks over BLE
+    if (audioDataUploading && audioBuffer && audioBufferSize > 0) {
+        size_t remaining = audioBufferSize - sent_audio_bytes;
+        if (remaining > 0) {
+            size_t bytes_to_copy;
+            // Use MTU-3 for maximum throughput (514 bytes payload)
+            const size_t max_first_chunk = (BLE_MTU_SIZE - 3) - 3;  // 511 bytes
+            const size_t max_chunk = (BLE_MTU_SIZE - 3) - 2;        // 512 bytes
+
+            if (sent_audio_frames == 0) {
+                // First chunk: includes codec info
+                s_audio_frame_buffer[0] = 0; // Frame index low byte
+                s_audio_frame_buffer[1] = 0; // Frame index high byte
+                s_audio_frame_buffer[2] = (uint8_t) AUDIO_DEFAULT_CODEC;
+                bytes_to_copy = (remaining > max_first_chunk) ? max_first_chunk : remaining;
+                memcpy(&s_audio_frame_buffer[3], &audioBuffer[sent_audio_bytes], bytes_to_copy);
+                audioDataCharacteristic->setValue(s_audio_frame_buffer, bytes_to_copy + 3);
+            } else {
+                // Subsequent chunks
+                s_audio_frame_buffer[0] = (uint8_t) (sent_audio_frames & 0xFF);
+                s_audio_frame_buffer[1] = (uint8_t) ((sent_audio_frames >> 8) & 0xFF);
+                bytes_to_copy = (remaining > max_chunk) ? max_chunk : remaining;
+                memcpy(&s_audio_frame_buffer[2], &audioBuffer[sent_audio_bytes], bytes_to_copy);
+                audioDataCharacteristic->setValue(s_audio_frame_buffer, bytes_to_copy + 2);
+            }
+            audioDataCharacteristic->notify();
+
+            sent_audio_bytes += bytes_to_copy;
+            sent_audio_frames++;
+
+            Serial.print("Uploading audio chunk ");
+            Serial.print(sent_audio_frames);
+            Serial.print(" (");
+            Serial.print(bytes_to_copy);
+            Serial.print(" bytes), ");
+            Serial.print(remaining - bytes_to_copy);
+            Serial.println(" bytes remaining.");
+
+            lastActivity = now; // Register activity
+
+            // Small delay to allow BLE stack to process and prevent stack overflow
+            delay(BLE_PHOTO_TRANSFER_DELAY);
+        } else {
+            // End of audio marker
+            s_audio_frame_buffer[0] = 0xFF;
+            s_audio_frame_buffer[1] = 0xFF;
+            audioDataCharacteristic->setValue(s_audio_frame_buffer, 2);
+            audioDataCharacteristic->notify();
+            Serial.println("Audio upload complete.");
+
+            audioDataUploading = false;
+            // Free audio buffer
+            if (audioBuffer) {
+                free(audioBuffer);
+                audioBuffer = nullptr;
+            }
+            Serial.println("Audio buffer freed.");
+        }
+    }
+
     // Light sleep optimization - major power savings while maintaining BLE
-    if (!photoDataUploading) {
+    if (!photoDataUploading && !audioDataUploading) {
         enableLightSleep();
     }
 
     // Adaptive delays for power saving (gentle optimization)
-    if (photoDataUploading) {
-        delay(20); // Fast during upload
+    if (photoDataUploading || audioDataUploading) {
+        delay(1); // Minimal delay for video-like streaming
     } else if (powerSaveMode) {
         delay(50); // Reduced delay with light sleep
     } else {
